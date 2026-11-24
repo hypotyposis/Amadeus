@@ -22,32 +22,6 @@
   "use strict";
 
   // ---------------------------------------------------------------------------
-  // PixiJS Application
-  // ---------------------------------------------------------------------------
-  const renderParams = new URLSearchParams(window.location.search || "");
-  const graphicsProfile = renderParams.get("graphicsProfile") || "standard";
-  const renderBudget = window.RenderBudget.resolveRenderBudget({
-    maxFps: renderParams.get("renderMaxFps"),
-    maxResolution: renderParams.get("renderMaxResolution"),
-    textureSampling: renderParams.get("renderTextureSampling"),
-    devicePixelRatio: window.devicePixelRatio,
-  });
-  const app = new PIXI.Application({
-    resizeTo: document.getElementById("canvas-container"),
-    backgroundAlpha: 0,          // Transparent background
-    autoDensity: true,
-    resolution: renderBudget.resolution,
-    antialias: true,
-  });
-  const frameRateController = window.RenderBudget.createFrameRateController(
-    app.ticker,
-    renderBudget.maxFps,
-  );
-  frameRateController.apply();
-  window.RenderBudget.installWallpaperEngineListener(window, frameRateController);
-  document.getElementById("canvas-container").appendChild(app.view);
-
-  // ---------------------------------------------------------------------------
   // SpriteRenderer — deprecated foreground sprite path kept for existing assets.
   // ---------------------------------------------------------------------------
   class SpriteRenderer {
@@ -1959,6 +1933,37 @@
   }
 
   // Mount the surface adapter for the existing Host bridge.
+  if (typeof window === "undefined") {
+    globalThis.SpriteForgeRuntime = SpriteForgeRuntime;
+    return;
+  }
+
+  // ---------------------------------------------------------------------------
+  // PixiJS Application
+  // ---------------------------------------------------------------------------
+  const renderParams = new URLSearchParams(window.location.search || "");
+  const graphicsProfile = renderParams.get("graphicsProfile") || "standard";
+  const renderBudget = window.RenderBudget.resolveRenderBudget({
+    maxFps: renderParams.get("renderMaxFps"),
+    maxResolution: renderParams.get("renderMaxResolution"),
+    textureSampling: renderParams.get("renderTextureSampling"),
+    devicePixelRatio: window.devicePixelRatio,
+  });
+  const app = new PIXI.Application({
+    resizeTo: document.getElementById("canvas-container"),
+    backgroundAlpha: 0,          // Transparent background
+    autoDensity: true,
+    resolution: renderBudget.resolution,
+    antialias: true,
+  });
+  const frameRateController = window.RenderBudget.createFrameRateController(
+    app.ticker,
+    renderBudget.maxFps,
+  );
+  frameRateController.apply();
+  window.RenderBudget.installWallpaperEngineListener(window, frameRateController);
+  document.getElementById("canvas-container").appendChild(app.view);
+
   window.renderApp = new RenderApp();
   console.log("[RenderEngine] renderer.js initialized");
   document.addEventListener("visibilitychange", () => window.renderApp._modelAdapter?.setPaused(document.hidden));

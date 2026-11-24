@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../render/web/renderer.js'), 'utf8');
 const start = source.indexOf('class RenderApp {');
-const end = source.indexOf('window.renderApp = new RenderApp', start);
+const end = source.indexOf('// Mount the surface adapter', start);
 assert.ok(start > 0 && end > start);
 const context = { app: { renderer: { textureGC: { maxIdle: 3600, checkCountMax: 600 } } }, AbortController, console };
 vm.createContext(context);

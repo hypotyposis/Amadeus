@@ -26,6 +26,7 @@ import {
 import { desktopPointHitsWindowRegions } from './wallpaperHitTesting.js'
 import { wallpaperWindowPolicy } from './wallpaperWindowPolicy.js'
 import { isWallpaperStartup } from './startupMode.js'
+import { startNativeWallpaper } from './macosWallpaper.js'
 import { managesWindowsWallpaper, recoverWindowsWallpaperHostExit, WINDOWS_WALLPAPER_STOP_TIMEOUT_MS, stopWallpaperForRenderer, WindowsWallpaperSession, windowsWallpaperDependencies } from './windowsWallpaper.js'
 import { WindowsWallpaperTray } from './windowsWallpaperTray.js'
 import { ApplicationLifecycle } from './appLifecycle.js'
@@ -137,6 +138,7 @@ let windowsWallpaperTray: WindowsWallpaperTray | null = null
 let workGlowWindow: BrowserWindow | null = null
 let workPanelWindow: BrowserWindow | null = null
 let electronSliceWindow: BrowserWindow | null = null
+let nativeWallpaper: { bridgeKey: string, session: ReturnType<typeof startNativeWallpaper> } | null = null
 const electronCanvasLifecycle = new WallpaperCanvasLifecycle<BrowserWindow>({
   getCursorScreenPoint: () => screen.getCursorScreenPoint(),
   pointHitsWindowRegions: desktopPointHitsWindowRegions,
@@ -308,13 +310,18 @@ function wantsWorkOverlay(args = process.argv): boolean {
   return args.includes('--work-overlay') || process.env.AMADEUS_WORK_OVERLAY === '1'
 }
 
+function wantsNativeWallpaper(): boolean {
+  return process.platform === 'darwin'
+    && (process.argv.includes('--native-wallpaper') || process.env.AMADEUS_MACOS_NATIVE_WALLPAPER === '1')
+}
+
 let wallpaperStartup: boolean | undefined
 function wantsWallpaper(): boolean {
   // Resolve once per launch; changing the GUI preference must not alter the
   // current window's close behavior or activate wallpaper halfway through use.
   if (wallpaperStartup === undefined) {
     const values = desktopSettings.snapshot(process.env).values as Record<string, string>
-    wallpaperStartup = isWallpaperStartup(process.argv, process.env, process.platform, values.AMADEUS_WINDOWS_STARTUP_MODE)
+    wallpaperStartup = wantsNativeWallpaper() || isWallpaperStartup(process.argv, process.env, process.platform, values.AMADEUS_WINDOWS_STARTUP_MODE)
   }
   return wallpaperStartup
 }
@@ -997,6 +1004,9 @@ function closeElectronSliceWindow(): void {
   companionBridge = null
   stopElectronSliceDesktopMonitor()
   closeElectronCanvasWindow()
+  const native = nativeWallpaper
+  nativeWallpaper = null
+  native?.session.stop()
   electronSliceWindow?.close()
   electronSliceWindow = null
   electronSliceBridgeKey = ''
@@ -1005,16 +1015,55 @@ function closeElectronSliceWindow(): void {
   electronSliceDocumentLoaded = false
 }
 
-function createElectronSliceWindow(rawBridge: unknown): boolean {
-  const bridge = normalizeWallpaperBridge(rawBridge)
-  if (!bridge) return false
-  const platformPolicy = wallpaperWindowPolicy(process.platform)
+function bindWallpaperBridge(bridge: WallpaperBridgeDescriptor): string {
   if (companionBridge && (companionBridge.bridgePort !== bridge.bridgePort || companionBridge.assetPort !== bridge.assetPort)) {
     void companionPanel.close()
   }
   companionBridge = bridge
   electronSliceLayout = bridge.sliceBounds
-  const bridgeKey = `${bridge.assetPort}:${bridge.bridgePort}:${bridge.assetVersion}:${JSON.stringify(bridge.sliceBounds)}`
+  return `${bridge.assetPort}:${bridge.bridgePort}:${bridge.assetVersion}:${JSON.stringify(bridge.sliceBounds)}`
+}
+
+async function openWallpaperScene(bridge: WallpaperBridgeDescriptor): Promise<boolean> {
+  if (!wantsNativeWallpaper() || electronSliceWindow) return createElectronSliceWindow(bridge)
+  const bridgeKey = bindWallpaperBridge(bridge)
+  if (nativeWallpaper?.bridgeKey === bridgeKey) return nativeWallpaper.session.ready
+  const previous = nativeWallpaper
+  nativeWallpaper = null
+  previous?.session.stop()
+
+  const executable = path.join(PROJECT_ROOT, 'build', 'native-wallpaper', 'AmadeusWallpaper')
+  if (!fs.existsSync(executable)) {
+    console.warn('[native-wallpaper] helper missing; starting web scene')
+    return createElectronSliceWindow(bridge)
+  }
+  const child = spawn(executable, [
+    String(bridge.assetPort), String(bridge.bridgePort), String(Math.round(bridge.renderMaxFps)),
+    String(bridge.renderMaxResolution ?? 0),
+    path.join(PROJECT_ROOT, 'render', 'web', 'renderer.js'),
+  ], { stdio: 'pipe' })
+  const session = startNativeWallpaper(child, () => {
+    if (nativeWallpaper?.session !== session) return
+    nativeWallpaper = null
+    console.warn('[native-wallpaper] helper exited; restoring web scene')
+    createElectronSliceWindow(bridge)
+  })
+  nativeWallpaper = { bridgeKey, session }
+  const ready = await session.ready
+  if (nativeWallpaper?.session !== session) return false
+  if (ready) {
+    createElectronCanvasWindow(bridge, bridgeKey)
+    console.info('[native-wallpaper] Metal scene ready')
+    return true
+  }
+  nativeWallpaper = null
+  console.warn('[native-wallpaper] helper unavailable; starting web scene')
+  return createElectronSliceWindow(bridge)
+}
+
+function createElectronSliceWindow(bridge: WallpaperBridgeDescriptor): boolean {
+  const platformPolicy = wallpaperWindowPolicy(process.platform)
+  const bridgeKey = bindWallpaperBridge(bridge)
   if (electronSliceWindow && !electronSliceWindow.isDestroyed()) {
     updateElectronSliceBounds()
     const bridgeChanged = electronSliceBridgeKey !== bridgeKey
@@ -2537,10 +2586,10 @@ ipcMain.handle('work-preview.set-bounds', (event, rawPreviewId: unknown, rawBoun
 })
 ipcMain.handle('electron-slice.open', async (event, bridge: unknown) => {
   if (!isMainRenderer(event.sender)) return false
+  const descriptor = normalizeWallpaperBridge(bridge)
+  if (!descriptor) return false
   if (process.platform === 'win32') ensureWindowsWallpaperTray()
   if (windowsWallpaper) {
-    const descriptor = normalizeWallpaperBridge(bridge)
-    if (!descriptor) return false
     try {
       await windowsWallpaper.start(`http://127.0.0.1:${descriptor.assetPort}/wallpaper/lively/index.html`)
     } catch (error) {
@@ -2549,7 +2598,7 @@ ipcMain.handle('electron-slice.open', async (event, bridge: unknown) => {
       return false
     }
   }
-  return createElectronSliceWindow(bridge)
+  return openWallpaperScene(descriptor)
 })
 ipcMain.handle('electron-slice.close', async (event, backendStopError?: unknown) => {
   if (!isMainRenderer(event.sender)) return false

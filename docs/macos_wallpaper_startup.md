@@ -50,3 +50,24 @@ Logs are written below `~/Library/Logs/Amadeus/`. Disable login startup with:
 The launcher never kills a process selected by port. If port 17777 belongs to
 an unknown or active listener, Electron reports the conflict and leaves that
 process untouched.
+
+## Native wallpaper preview
+
+Build the native helper with the macOS SDK and start the wallpaper in native
+mode from the checkout.
+
+```bash
+npm --prefix electron run build
+./scripts/build_macos_native_wallpaper.sh
+./scripts/start_wallpaper.sh --native-wallpaper
+```
+
+The preview requires macOS 14 or later. It uses an AppKit desktop window,
+VideoToolbox for the SpriteForge video pack, and Metal for the CRT scene. It
+runs the same SpriteForge animation graph through JavaScriptCore. The separate
+message input and Work Canvas windows continue to use Electron.
+
+The native preview requires a supported SpriteForge VP9 video pack. Live2D,
+static-only packs and custom wallpaper scenarios still use the web scene.
+The native scene draws the character and captions. Web-specific lighting and
+mouth overlays are still separate from this preview.
