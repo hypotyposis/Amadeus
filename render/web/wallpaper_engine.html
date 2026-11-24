@@ -17,6 +17,29 @@
       height: 100%;
       position: relative;
     }
+    .wallpaper-local-canvas, .wallpaper-surround, .wallpaper-surround-art {
+      position: absolute;
+    }
+    .wallpaper-surround {
+      inset: 0;
+      overflow: hidden;
+      isolation: isolate;
+      pointer-events: none;
+    }
+    .wallpaper-surround-art > div, .wallpaper-surround-glow {
+      position: absolute;
+      inset: 0;
+    }
+    .wallpaper-surround-art img, .wallpaper-surround-art canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    .wallpaper-surround-glow {
+      background: #73d8ff;
+      mix-blend-mode: plus-lighter;
+      opacity: 0;
+    }
     /* 确保 Pixi 创建的 canvas 不遮挡 body 背景图 */
     #canvas-container canvas {
       background: transparent !important;

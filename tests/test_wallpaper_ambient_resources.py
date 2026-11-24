@@ -15,10 +15,14 @@ def test_ambient_replay_texture_ownership():
     script=r'''
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 const source=fs.readFileSync('render/web/wallpaper_scene.js','utf8');
-const extract=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end)).trim().replace(/,$/,'');
+const extract=(method,next)=>{
+ const start=source.indexOf('\n    '+method+'('), end=source.indexOf('\n    '+next+'(',start);
+ assert.ok(start>=0 && end>start,method);
+ return source.slice(start,end).trim().replace(/,$/,'');
+};
 class Sprite{constructor(texture){this.texture=texture;}destroy(options){if(options.texture)this.texture.destroy(options.baseTexture);}}
-const methods=vm.runInNewContext('({'+extract('_replaceAmbientLowSprite(texture) {','_loadAmbientLowSprite(url) {')+','+
- extract('_replaceAmbientSprite(texture, sourceKind) {','_loadAmbientSprite(url, sourceKind) {')+'})',{PIXI:{Sprite,BLEND_MODES:{}},console:{info(){}}});
+const methods=vm.runInNewContext('({'+extract('_replaceAmbientLowSprite','_loadAmbientLowSprite')+','+
+ extract('_replaceAmbientSprite','_loadAmbientSprite')+'})',{PIXI:{Sprite,BLEND_MODES:{}},console:{info(){}}});
 const makeTexture=(base={destroyed:false})=>({baseTexture:base,destroyed:false,destroy(destroyBase){this.destroyed=true;if(destroyBase)this.baseTexture.destroyed=true;}});
 for(const [method,property] of [['_replaceAmbientLowSprite','ambientLowSprite'],['_replaceAmbientSprite','ambientSprite']]){
  for(const mode of ['same-texture','different-texture','shared-base']){

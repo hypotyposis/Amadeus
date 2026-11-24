@@ -24,6 +24,86 @@
     };
   }
 
+  function desktopCanvasRect(screen, bounds) {
+    const full = { x: 0, y: 0, width: screen.width, height: screen.height };
+    if (!bounds) return full;
+    const x = Math.max(0, Math.floor(bounds.x));
+    const y = Math.max(0, Math.floor(bounds.y));
+    const right = Math.min(full.width, Math.ceil(bounds.right));
+    const bottom = Math.min(full.height, Math.ceil(bounds.bottom));
+    return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : full;
+  }
+
+  function ambientClipPath({ width, height, data }) {
+    let left = width;
+    let top = height;
+    let right = 0;
+    let bottom = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        if (!data[(y * width + x) * 4 + 3]) continue;
+        left = Math.min(left, x);
+        top = Math.min(top, y);
+        right = Math.max(right, x + 1);
+        bottom = y + 1;
+      }
+    }
+    if (!right) return "inset(50%)";
+    // Leave space for the linear sample at the edge of the visible pixels.
+    const percent = (pixels, size) => `${100 * Math.max(0, pixels - 1) / size}%`;
+    return `inset(${percent(top, height)} ${percent(width - right, width)} ${percent(height - bottom, height)} ${percent(left, width)})`;
+  }
+
+  function createDesktopViewport(app) {
+    const canvas = app.view;
+    const host = canvas.parentElement;
+    const surround = document.createElement("div");
+    const art = document.createElement("div");
+    const background = document.createElement("div");
+    const ambientLow = document.createElement("div");
+    const ambient = document.createElement("div");
+    const glow = document.createElement("div");
+    surround.className = "wallpaper-surround";
+    art.className = "wallpaper-surround-art";
+    glow.className = "wallpaper-surround-glow";
+    art.append(background, ambientLow, ambient);
+    surround.append(art, glow);
+    host.prepend(surround);
+    canvas.classList.add("wallpaper-local-canvas");
+    app.resizeTo = null;
+
+    return {
+      get screen() {
+        return { width: Math.max(1, host.clientWidth), height: Math.max(1, host.clientHeight) };
+      },
+      setSource(layer, sprite, clipPath = "") {
+        const source = sprite.texture.baseTexture.resource.source;
+        layer.replaceChildren(source instanceof HTMLImageElement ? source.cloneNode() : source);
+        layer.style.mixBlendMode = sprite.blendMode === PIXI.BLEND_MODES.ADD ? "plus-lighter" : "normal";
+        layer.style.clipPath = clipPath;
+      },
+      background,
+      ambientLow,
+      ambient,
+      glow,
+      layout(bounds, transform) {
+        const screen = this.screen;
+        const { x, y, width, height } = desktopCanvasRect(screen, bounds);
+        // Keep the scene and its masks in desktop coordinates. The canvas
+        // origin cancels the root translation when Chromium composites it.
+        surround.hidden = !x && !y && width === screen.width && height === screen.height;
+        art.style.left = `${transform.x}px`;
+        art.style.top = `${transform.y}px`;
+        art.style.width = `${transform.width}px`;
+        art.style.height = `${transform.height}px`;
+        canvas.style.left = `${x}px`;
+        canvas.style.top = `${y}px`;
+        app.stage.position.set(-x, -y);
+        if (app.screen.width !== width || app.screen.height !== height) app.renderer.resize(width, height);
+      },
+    };
+  }
+
   function callRender(method, args) {
     if (!window.renderApp || typeof window.renderApp[method] !== "function") {
       console.warn("[WallpaperScene] renderApp method unavailable:", method);
@@ -156,6 +236,7 @@
         this.frame.texture = tex;
         this._aspect = Math.max(1, (tex.width || 2564) / Math.max(1, tex.height || 430));
         this.layout(this._bounds);
+        desktopScene._layoutDesktopViewport();
         diag("subtitle.frame_ready", { url: this.frameUrl, width: tex.width || 0, height: tex.height || 0 });
       };
       if (tex.baseTexture && tex.baseTexture.valid) {
@@ -171,6 +252,7 @@
       if (this.text) this.text.text = this.currentText;
       this.layout(this._bounds);
       this.updateVisibility();
+      desktopScene._layoutDesktopViewport();
     },
 
     layout(bounds) {
@@ -1792,6 +1874,7 @@
     _subtitleClearDelayMs: 15000,
     _mode: "sprite",
     _externalCanvasHost: false,
+    _desktopViewport: null,
 
     init(payload) {
       this.app = callRender("getPixiApp", []);
@@ -1800,7 +1883,14 @@
         return;
       }
 
+      const params = new URLSearchParams(window.location.search || "");
+      this._externalCanvasHost = params.get("sliceHost") === "electron";
       if (!this.mask) {
+        // The macOS Electron scene owns its viewport and uses a separate
+        // native window for Canvas and keyboard input.
+        if (this._externalCanvasHost && params.get("host") === "electron") {
+          this._desktopViewport = createDesktopViewport(this.app);
+        }
         this.mask = new PIXI.Graphics();
         this.mask.renderable = false;
         this.staticOverlay = new PIXI.Graphics();
@@ -1826,7 +1916,6 @@
       }
 
       this.cfg = (payload && payload.crtConfig) || {};
-      this._externalCanvasHost = new URLSearchParams(window.location.search || "").get("sliceHost") === "electron";
       this.setDefaultSubtitleEnabled(!!(payload && payload.defaultSubtitleEnabled));
       this._ambientBurstDelay = this._ambientBurstInterval();
       this.setAmbientLow((payload && payload.ambientLowUrl) || "");
@@ -1894,6 +1983,8 @@
         this.app.stage.addChildAt(nextBg, 0);
         this.bg = nextBg;
         this.backgroundUrl = url;
+        const viewport = this._desktopViewport;
+        if (viewport) viewport.setSource(viewport.background, nextBg);
         this.layout();
         if (previousBg && previousBg !== nextBg) {
           try {
@@ -1958,6 +2049,8 @@
       this._placeBackdrop(this.ambientLowSprite);
       this.ambientLowSprite.alpha = this._ambientLowIdleAlpha();
       this.ambientLayer.addChildAt(this.ambientLowSprite, 0);
+      const viewport = this._desktopViewport;
+      if (viewport) viewport.setSource(viewport.ambientLow, this.ambientLowSprite);
       console.info("[WallpaperScene] ambient low layer ready:", {
         alpha: this.ambientLowSprite.alpha,
       });
@@ -1978,7 +2071,7 @@
       }
     },
 
-    _replaceAmbientSprite(texture, sourceKind) {
+    _replaceAmbientSprite(texture, sourceKind, clipPath) {
       if (this.ambientSprite) {
         this.ambientLayer.removeChild(this.ambientSprite);
         // Pixi may return the existing cached texture on a Host replay.
@@ -1995,6 +2088,8 @@
         this.ambientSprite.blendMode = PIXI.BLEND_MODES.ADD;
       }
       this.ambientLayer.addChild(this.ambientSprite);
+      const viewport = this._desktopViewport;
+      if (viewport) viewport.setSource(viewport.ambient, this.ambientSprite, clipPath);
       console.info("[WallpaperScene] ambient layer ready:", {
         source: sourceKind,
         alpha: this.ambientSprite.alpha,
@@ -2062,6 +2157,7 @@
       } else if (this._lastSubtitleText) {
         characterRuntime.setSubtitle(this._lastSubtitleText);
       }
+      this._layoutDesktopViewport();
       diag("subtitle.default_enabled", { enabled: this._defaultSubtitleEnabled });
     },
 
@@ -2086,7 +2182,7 @@
     },
 
     _imageTransform() {
-      const screen = this.app.screen;
+      const screen = this._desktopViewport?.screen || this.app.screen;
       const imgSize = this.cfg.img_size || [screen.width, screen.height];
       return coverTransform(Math.max(1, Number(imgSize[0]) || 1), Math.max(1, Number(imgSize[1]) || 1),
         screen.width, screen.height);
@@ -2102,12 +2198,12 @@
     },
 
     _crtPoints() {
-      const app = this.app;
+      const screen = this._desktopViewport?.screen || this.app.screen;
       const rawPoints = this.cfg.crt_polygon || this.cfg.crt_corners || [
         [0, 0],
-        [app.screen.width, 0],
-        [app.screen.width, app.screen.height],
-        [0, app.screen.height],
+        [screen.width, 0],
+        [screen.width, screen.height],
+        [0, screen.height],
       ];
       const t = this._imageTransform();
       return rawPoints.map((p) => ({ x: Number(p[0]) * t.scale + t.x, y: Number(p[1]) * t.scale + t.y }));
@@ -2155,8 +2251,29 @@
       if (this.canvasSurface && typeof this.canvasSurface.layout === "function") {
         this.canvasSurface.layout(bounds);
       }
+      this._layoutDesktopViewport();
       this._drawGlow();
       this._drawScanlineNoise();
+    },
+
+    _layoutDesktopViewport() {
+      const viewport = this._desktopViewport;
+      if (!viewport || !this._crtBounds) return;
+      if (!this.bg || this._defaultSubtitleEnabled) {
+        viewport.layout(null, this._imageTransform());
+        return;
+      }
+      const { x, y, right, bottom } = this._crtBounds;
+      const vignette = this.bottomVignette;
+      const subtitle = wallpaperSubtitle.container;
+      const caption = subtitle?.visible ? subtitle.getLocalBounds() : null;
+      const bounds = {
+        x: Math.min(x, caption?.left ?? x),
+        y: Math.min(y, caption?.top ?? y),
+        right: Math.max(right, caption?.right ?? right),
+        bottom: Math.max(bottom, vignette.y + vignette.height, caption?.bottom ?? bottom),
+      };
+      viewport.layout(bounds, this._imageTransform());
     },
 
     setCanvas(payload) {
@@ -2288,12 +2405,15 @@
       const pulse = Math.max(0, Math.min(1, this._mouthPulse));
       this.glowLayer.clear();
       this._drawAmbientLamp(pulse);
-      if (pulse <= 0.01) return;
+      const viewport = this._desktopViewport;
+      const roomAlpha = pulse > 0.01 ? pulse * 0.006 : 0;
+      if (viewport) viewport.glow.style.opacity = roomAlpha;
+      if (!roomAlpha) return;
 
       const screenAlpha = pulse * 0.018;
-      const roomAlpha = pulse * 0.006;
+      const screen = viewport?.screen || this.app.screen;
       this.glowLayer.beginFill(0x73d8ff, roomAlpha);
-      this.glowLayer.drawRect(0, 0, this.app.screen.width, this.app.screen.height);
+      this.glowLayer.drawRect(0, 0, screen.width, screen.height);
       this.glowLayer.endFill();
       this._drawPolygon(this.glowLayer, this._points, 0x9be9ff, screenAlpha);
     },
@@ -2400,7 +2520,9 @@
           blurredCtx.filter = "blur(14px)";
           blurredCtx.drawImage(raw, 0, 0);
 
-          this._replaceAmbientSprite(PIXI.Texture.from(blurred), "generated-mask");
+          const clipPath = this._desktopViewport
+            ? ambientClipPath(blurredCtx.getImageData(0, 0, w, h)) : "";
+          this._replaceAmbientSprite(PIXI.Texture.from(blurred), "generated-mask", clipPath);
           console.info("[WallpaperScene] generated ambient mask:", {
             rect,
           });
@@ -2427,6 +2549,15 @@
       if (this.ambientSprite) {
         const alpha = this._ambientBaseAlpha() + intensity * this._ambientPulseAlpha();
         this.ambientSprite.alpha = Math.max(0, Math.min(1.25, alpha));
+      }
+      const viewport = this._desktopViewport;
+      if (viewport) {
+        if (this.ambientLowSprite) viewport.ambientLow.style.opacity = this.ambientLowSprite.alpha;
+        if (this.ambientSprite) {
+          // Match the 8-bit output precision so subpixel alpha changes don't
+          // invalidate the browser's composition on every animation tick.
+          viewport.ambient.style.opacity = Math.round(this.ambientSprite.alpha * 255) / 255;
+        }
       }
     },
 
